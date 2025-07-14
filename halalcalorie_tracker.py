@@ -472,7 +472,7 @@ def validate_halal_data(data):
     return data
 
 def hybrid_analysis(client, uploaded_file):
-    """Perform hybrid analysis with OCR and halal assessment"""
+    """Perform simple text-based analysis without JSON complexity"""
     
     # Extract text
     extracted_text = extract_text_with_gpt4o_mini(client, uploaded_file)
@@ -480,79 +480,21 @@ def hybrid_analysis(client, uploaded_file):
     if not extracted_text or len(extracted_text.strip()) < 10:
         return None
     
-    # Try primary analysis first
-    analysis_response = analyze_halal_status(client, extracted_text)
+    # Get simple analysis
+    response = analyze_halal_status_simple(client, extracted_text)
     
-    if analysis_response:
-        response_clean = analysis_response.strip()
-        if response_clean and response_clean.startswith('{') and len(response_clean) > 30:
-            return analysis_response
-    
-    # Fallback: Try simplified analysis with different approach
-    fallback_response = analyze_halal_status_fallback(client, extracted_text)
-    
-    if fallback_response:
-        response_clean = fallback_response.strip()
-        if response_clean and response_clean.startswith('{') and len(response_clean) > 30:
-            return fallback_response
+    if response and len(response.strip()) > 20:
+        return response
     
     return None
 
-def analyze_halal_status_fallback(client, extracted_text):
-    """Fallback analysis with simpler prompt structure"""
+def display_simple_results(analysis):
+    """Display results from simple text-based analysis"""
     
-    simple_prompt = f"""Analyze this food ingredient text for halal compliance according to JAKIM Malaysia standards.
-
-Text: {extracted_text}
-
-Respond with this exact JSON format only:
-{{
-  "ingredients": [
-    {{
-      "name": "ingredient name in English",
-      "original_text": "original text from package", 
-      "halal_status": "halal",
-      "reason": "explanation"
-    }}
-  ],
-  "overall_halal_status": "halal",
-  "overall_halal_confidence": 85,
-  "main_concerns": "summary of concerns"
-}}
-
-Rules:
-- halal_status must be: "halal", "haram", or "syubhah"
-- Mark as "haram": pork, alcohol, non-halal animal products
-- Mark as "syubhah": unclear sources, questionable E-numbers
-- Confidence: 0-100 integer
-- NO text before or after JSON"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Use more reliable model for fallback
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a halal analyst. Respond only with valid JSON following the exact format specified."
-                },
-                {
-                    "role": "user", 
-                    "content": simple_prompt
-                }
-            ],
-            max_tokens=800,
-            temperature=0.0
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        st.error(f"Fallback analysis failed: {e}")
-        return None
-
-def display_halal_results(analysis):
-    """Display streamlined halal status results with focus on problematic ingredients"""
-    
-    confidence = analysis['overall_halal_confidence']
-    status = analysis['overall_halal_status'].lower()
+    status = analysis['status']
+    confidence = analysis['confidence']
+    concerns = analysis['concerns']
+    problematic_ingredients = analysis['problematic_ingredients']
     
     # Create three columns for better layout
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -576,78 +518,98 @@ def display_halal_results(analysis):
             st.warning(f"**Confidence: {confidence}%**")
             st.markdown("This product contains questionable ingredients under JAKIM halal standards. Exercise caution.")
     
-    # Display main concerns if any
-    if analysis['main_concerns'] and analysis['main_concerns'].strip():
-        st.info(f"**Key Concerns:** {analysis['main_concerns']}")
+    # Display main concerns
+    if concerns and concerns.strip() and concerns != "No specific concerns identified":
+        st.info(f"**Key Concerns:** {concerns}")
     
     st.markdown("---")
     
-    # Filter and display ONLY problematic ingredients (Haram and Syubhah)
-    problematic_ingredients = [
-        ingredient for ingredient in analysis['ingredients']
-        if ingredient['halal_status'].lower() in ['haram', 'syubhah']
-    ]
-    
-    if problematic_ingredients:
-        st.header("⚠️ Ingredients of Concern")
-        st.markdown("*Only showing Haram and Syubhah ingredients that require attention*")
+    # Display problematic ingredients if any
+    if problematic_ingredients and len(problematic_ingredients) > 0:
+        # Check if there are actual problematic ingredients vs just default messages
+        has_real_ingredients = any(
+            ingredient for ingredient in problematic_ingredients 
+            if ingredient not in ["See main concerns section for details", "Could not analyze ingredients properly"]
+        )
         
-        # Sort by severity: Haram first, then Syubhah
-        def get_severity(ingredient):
-            return 1 if ingredient['halal_status'].lower() == 'haram' else 2
-        
-        sorted_problematic = sorted(problematic_ingredients, key=get_severity)
-        
-        for i, ingredient in enumerate(sorted_problematic, 1):
-            status_lower = ingredient['halal_status'].lower()
+        if has_real_ingredients:
+            st.header("⚠️ Ingredients of Concern")
+            st.markdown("*Showing problematic ingredients that require attention*")
             
-            # Status styling and icons
-            if status_lower == "haram":
-                icon = "❌"
-                status_text = "HARAM"
-                status_color = "red"
-                alert_type = "error"
-            else:  # syubhah
-                icon = "⚠️"
-                status_text = "SYUBHAH"
-                status_color = "orange"
-                alert_type = "warning"
-            
-            # Get ingredient names
-            english_name = ingredient.get('name', 'Unknown ingredient')
-            original_text = ingredient.get('original_text', '')
-            reason = ingredient.get('reason', 'No explanation provided')
-            
-            # Create expandable section for each problematic ingredient
-            with st.expander(f"{icon} **{status_text}** - {english_name}", expanded=True):
-                col_left, col_right = st.columns([2, 3])
+            for i, ingredient in enumerate(problematic_ingredients, 1):
+                if ingredient in ["See main concerns section for details", "Could not analyze ingredients properly"]:
+                    continue
                 
-                with col_left:
-                    st.markdown(f"**English Name:** {english_name}")
-                    if original_text and original_text != english_name:
-                        st.markdown(f"**Original Text:** {original_text}")
-                    st.markdown(f"**Status:** {ingredient['halal_status'].title()}")
-                
-                with col_right:
-                    st.markdown("**JAKIM MS 1500:2019 Explanation:**")
-                    if alert_type == "error":
-                        st.error(f"🚫 **Why HARAM:** {reason}")
+                # Parse ingredient info
+                if ":" in ingredient and " - " in ingredient:
+                    # Format: "Name: Status - Reason"
+                    name_status, reason = ingredient.split(" - ", 1)
+                    if ":" in name_status:
+                        name, status_text = name_status.split(":", 1)
+                        name = name.strip()
+                        status_text = status_text.strip().upper()
+                        reason = reason.strip()
                     else:
-                        st.warning(f"⚠️ **Why SYUBHAH:** {reason}")
+                        name = name_status.strip()
+                        status_text = "SYUBHAH"
+                        reason = ingredient
+                else:
+                    name = ingredient
+                    status_text = "SYUBHAH"
+                    reason = "Requires further investigation"
                 
-                # Add specific JAKIM guidance based on ingredient type
-                guidance = get_jakim_guidance(english_name, original_text, status_lower)
-                if guidance:
-                    st.info(f"**JAKIM Guidance:** {guidance}")
+                # Display with appropriate styling
+                if "HARAM" in status_text:
+                    st.error(f"❌ **{name}** - HARAM")
+                    st.error(f"**Reason:** {reason}")
+                else:
+                    st.warning(f"⚠️ **{name}** - SYUBHAH")
+                    st.warning(f"**Reason:** {reason}")
+                
+                st.markdown("---")
         
-        # Summary of problematic ingredients
-        haram_count = sum(1 for ing in problematic_ingredients if ing['halal_status'].lower() == 'haram')
-        syubhah_count = sum(1 for ing in problematic_ingredients if ing['halal_status'].lower() == 'syubhah')
+        else:
+            # No specific problematic ingredients identified
+            if status in ['haram', 'syubhah']:
+                st.header("⚠️ Analysis Summary")
+                st.markdown("*Concerns identified but specific ingredients may require manual review*")
+                
+                for ingredient in problematic_ingredients:
+                    if status == 'haram':
+                        st.error(f"❌ {ingredient}")
+                    else:
+                        st.warning(f"⚠️ {ingredient}")
+    
+    else:
+        # No problematic ingredients found
+        if status == 'halal':
+            st.success("### ✅ No Ingredients of Concern Found")
+            st.markdown("All identified ingredients appear to be **Halal** according to JAKIM standards.")
+        else:
+            st.info("### 📋 General Assessment")
+            st.markdown("Detailed ingredient breakdown not available. Please review main concerns above.")
+    
+    # Show raw analysis for transparency
+    if 'full_response' in analysis:
+        with st.expander("📋 Full Analysis Details", expanded=False):
+            st.text(analysis['full_response'])
+    
+    # Explanation of JAKIM standards
+    with st.expander("ℹ️ About JAKIM MS 1500:2019 Standards"):
+        st.markdown("""
+        **JAKIM (Department of Islamic Development Malaysia)** sets the world's most stringent halal certification standards based on MS 1500:2019:
         
-        st.markdown("---")
-        st.markdown("### 📊 Summary of Concerns")
+        - **Zero tolerance** for alcohol from khamr (fermented/distilled sources)
+        - **Strict verification** of animal sources and slaughter methods per Hukum Syarak
+        - **Comprehensive assessment** of all E-numbers and processing aids per MS 1500:2019
+        - **Conservative approach** to questionable ingredients (marked as Syubhah)
+        - **Cross-contamination prevention** throughout the entire supply chain
         
-        col_summary1, col_summary2, col_summary3 = st.columns(3)
+        **Status Meanings:**
+        - **Halal**: Permissible according to Islamic law and MS 1500:2019 standards
+        - **Haram**: Prohibited according to Islamic law and JAKIM classification
+        - **Syubhah**: Doubtful/questionable - best to avoid when possible per conservative JAKIM approach
+        """).columns(3)
         with col_summary1:
             st.metric("❌ Haram Ingredients", haram_count)
         with col_summary2:
@@ -863,14 +825,14 @@ def main():
                         st.error("❌ Analysis failed. Please try with a clearer image of the ingredients list.")
                         
                         # Try emergency fallback analysis
-                        with st.spinner("🔄 Trying alternative analysis method..."):
+                        with st.spinner("🔄 Trying basic keyword analysis..."):
                             # Get the extracted text again for emergency analysis
                             extracted_text = extract_text_with_gpt4o_mini(client, uploaded_file)
                             if extracted_text and len(extracted_text.strip()) > 10:
-                                emergency_analysis = create_minimal_analysis_from_text(extracted_text)
-                                st.warning("⚠️ Using simplified analysis method")
-                                st.header("📊 Halal Status Results (Simplified)")
-                                display_halal_results(emergency_analysis)
+                                emergency_analysis = create_basic_keyword_analysis(extracted_text)
+                                st.warning("⚠️ Using basic keyword analysis")
+                                st.header("📊 Halal Status Results (Basic)")
+                                display_simple_results(emergency_analysis)
                                 
                                 # Show what text was detected
                                 with st.expander("📝 Detected Text from Image"):
@@ -884,24 +846,65 @@ def main():
                                 - Image is not blurry or too small
                                 """)
                         return
+
+def create_basic_keyword_analysis(extracted_text):
+    """Create basic analysis using simple keyword detection"""
+    
+    text_lower = extracted_text.lower()
+    
+    # Common problematic ingredients
+    haram_keywords = ['pork', 'bacon', 'ham', 'wine', 'alcohol', 'lard', 'gelatin']
+    syubhah_keywords = ['emulsifier', 'lecithin', 'mono', 'diglyceride', 'enzyme', 'glycerol', 'e471', 'e472']
+    
+    found_haram = [kw for kw in haram_keywords if kw in text_lower]
+    found_syubhah = [kw for kw in syubhah_keywords if kw in text_lower]
+    
+    problematic_ingredients = []
+    
+    # Add found ingredients
+    for ingredient in found_haram:
+        problematic_ingredients.append(f"{ingredient.title()}: HARAM - Prohibited ingredient under JAKIM standards")
+    
+    for ingredient in found_syubhah:
+        problematic_ingredients.append(f"{ingredient.title()}: SYUBHAH - Requires source verification per JAKIM MS 1500:2019")
+    
+    # Determine overall status
+    if found_haram:
+        status = "haram"
+        confidence = 70
+        concerns = f"Contains prohibited ingredients: {', '.join(found_haram)}"
+    elif found_syubhah:
+        status = "syubhah"
+        confidence = 50
+        concerns = f"Contains questionable ingredients: {', '.join(found_syubhah)}"
+    else:
+        status = "syubhah"
+        confidence = 30
+        concerns = "Could not identify specific problematic ingredients, but manual review recommended"
+        problematic_ingredients = ["Basic analysis complete - manual verification recommended"]
+    
+    return {
+        "status": status,
+        "confidence": confidence,
+        "concerns": concerns,
+        "problematic_ingredients": problematic_ingredients,
+        "full_response": f"Basic keyword analysis of: {extracted_text[:200]}..."
+    }
                     
                     # Parse and display results
-                    analysis = parse_halal_response(response)
+                    analysis = parse_simple_analysis(response)
                     
-                    if analysis and 'ingredients' in analysis:
+                    if analysis:
                         st.header("📊 Halal Status Results")
-                        display_halal_results(analysis)
+                        display_simple_results(analysis)
                     else:
                         st.error("❌ Could not analyze ingredients. Please ensure the ingredients list is clearly visible.")
                         
                         # Show debug info for troubleshooting
                         if response:
                             with st.expander("🔧 Debug Information", expanded=False):
-                                st.text("Raw AI Response:")
-                                st.code(response[:500] + "..." if len(response) > 500 else response)
-                                if analysis:
-                                    st.text("Parsed Analysis:")
-                                    st.json(analysis)
+                                st.text("AI Response:")
+                                st.text(response)
                 
                 except Exception as e:
                     st.error(f"❌ Error during analysis: {str(e)}")
