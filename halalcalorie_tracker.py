@@ -121,9 +121,18 @@ CRITICAL INSTRUCTIONS:
 1. Analyze ALL ingredients found in the text
 2. Follow JAKIM halal standards strictly
 3. Respond with ONLY valid JSON - no explanations, no markdown
+4. MUST include ingredients array even if empty
 
 OUTPUT FORMAT - EXACT JSON STRUCTURE:
 {{
+  "ingredients": [
+    {{
+      "name": "proper english translation of ingredient",
+      "original_text": "original text from package",
+      "halal_status": "halal",
+      "reason": "brief reason based on JAKIM standards"
+    }}
+  ],
   "overall_halal_status": "halal",
   "overall_halal_confidence": 85,
   "main_concerns": "brief summary of main issues per JAKIM standards"
@@ -237,6 +246,14 @@ def parse_halal_response(response_text):
 def create_default_response(reason):
     """Create a default response when parsing fails"""
     return {
+        "ingredients": [
+            {
+                "name": "Analysis incomplete",
+                "original_text": "Could not parse AI response",
+                "halal_status": "syubhah",
+                "reason": f"Analysis failed: {reason}"
+            }
+        ],
         "overall_halal_status": "syubhah",
         "overall_halal_confidence": 30,
         "main_concerns": f"Analysis failed: {reason}"
@@ -244,7 +261,7 @@ def create_default_response(reason):
 
 def validate_halal_data(data):
     """Validate and fix parsed JSON data"""
-    # Ensure required fields exist
+    # Ensure all required fields exist
     if 'overall_halal_status' not in data:
         data['overall_halal_status'] = 'syubhah'
     
@@ -253,6 +270,40 @@ def validate_halal_data(data):
     
     if 'main_concerns' not in data:
         data['main_concerns'] = "Incomplete analysis"
+    
+    # Ensure ingredients array exists
+    if 'ingredients' not in data:
+        data['ingredients'] = []
+    
+    # If ingredients is empty or not a list, create a default entry
+    if not isinstance(data['ingredients'], list) or len(data['ingredients']) == 0:
+        data['ingredients'] = [
+            {
+                "name": "No ingredients detected",
+                "original_text": "Analysis incomplete",
+                "halal_status": "syubhah",
+                "reason": "Could not identify ingredients"
+            }
+        ]
+    
+    # Fix each ingredient
+    for i, ingredient in enumerate(data['ingredients']):
+        if not isinstance(ingredient, dict):
+            continue
+        
+        required_fields = ['name', 'halal_status', 'reason']
+        for field in required_fields:
+            if field not in ingredient:
+                if field == 'name':
+                    ingredient[field] = f"Ingredient {i+1}"
+                elif field == 'halal_status':
+                    ingredient[field] = "syubhah"
+                elif field == 'reason':
+                    ingredient[field] = "Incomplete data"
+        
+        # Ensure original_text exists
+        if 'original_text' not in ingredient:
+            ingredient['original_text'] = ingredient.get('name', 'Unknown')
     
     # Validate halal status
     valid_statuses = ['halal', 'haram', 'syubhah']
@@ -525,7 +576,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # Header
-    st.title("🥘 JAKIM Halal Checker")
+    st.title("🥘 Halal Checker")
     st.markdown("**Quick halal verification using Malaysia's JAKIM standards**")
     
     # Current standards information
@@ -609,11 +660,20 @@ def main():
                     # Parse and display results
                     analysis = parse_halal_response(response)
                     
-                    if analysis:
+                    if analysis and 'ingredients' in analysis:
                         st.header("📊 Halal Status Results")
                         display_halal_results(analysis)
                     else:
                         st.error("❌ Could not analyze ingredients. Please ensure the ingredients list is clearly visible.")
+                        
+                        # Show debug info for troubleshooting
+                        if response:
+                            with st.expander("🔧 Debug Information", expanded=False):
+                                st.text("Raw AI Response:")
+                                st.code(response[:500] + "..." if len(response) > 500 else response)
+                                if analysis:
+                                    st.text("Parsed Analysis:")
+                                    st.json(analysis)
                 
                 except Exception as e:
                     st.error(f"❌ Error during analysis: {str(e)}")
