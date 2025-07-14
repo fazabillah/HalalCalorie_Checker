@@ -398,7 +398,7 @@ def main():
         # Display uploaded image
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+            st.image(uploaded_file, caption="Uploaded Image", use_container_width=True)
         
         # Check file size
         file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
