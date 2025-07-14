@@ -112,31 +112,31 @@ Return ONLY the extracted text, preserving the original language and formatting.
 def analyze_halal_status(client, extracted_text):
     """Analyze extracted text for halal status using JAKIM standards"""
     
-    analysis_prompt = f"""You are a halal food analyst following JAKIM (Jabatan Kemajuan Islam Malaysia) halal standards. Analyze the following extracted text from a food package for halal compliance.
+    analysis_prompt = f"""You are a halal food analyst following JAKIM Malaysia halal standards. Analyze the extracted text for halal compliance.
 
-Extracted text from package:
-{extracted_text}
+Text: {extracted_text}
 
-CRITICAL INSTRUCTIONS:
-1. Analyze ALL ingredients found in the text
-2. Follow JAKIM halal standards strictly
-3. Respond with ONLY valid JSON - no explanations, no markdown
-4. MUST include ingredients array even if empty
+Respond with ONLY this JSON structure with NO additional text:
 
-OUTPUT FORMAT - EXACT JSON STRUCTURE:
 {{
   "ingredients": [
     {{
-      "name": "proper english translation of ingredient",
-      "original_text": "original text from package",
+      "name": "English ingredient name",
+      "original_text": "original text",
       "halal_status": "halal",
-      "reason": "brief reason based on JAKIM standards"
+      "reason": "explanation"
     }}
   ],
   "overall_halal_status": "halal",
   "overall_halal_confidence": 85,
-  "main_concerns": "brief summary of main issues per JAKIM standards"
+  "main_concerns": "summary"
 }}
+
+IMPORTANT RULES:
+- halal_status MUST be exactly: "halal", "haram", or "syubhah"
+- confidence MUST be integer 0-100
+- NO markdown, NO code blocks, NO extra text
+- ONLY the JSON object above
 
 JAKIM MS 1500:2019 HALAL STANDARDS - CURRENT REQUIREMENTS:
 1. **Animal-derived ingredients**: Must be from halal animals slaughtered according to Islamic law and Hukum Syarak
@@ -190,8 +190,96 @@ Apply JAKIM standards strictly - be conservative in assessment. When unsure abou
         st.error(f"Analysis failed: {e}")
         return None
 
+def repair_json(json_str):
+    """Attempt to repair common JSON syntax errors"""
+    
+    try:
+        # First attempt - try parsing as is
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+    
+    # Common repair attempts
+    repairs = [
+        # Fix missing commas
+        lambda s: re.sub(r'}\s*{', '},{', s),
+        lambda s: re.sub(r']\s*{', '],{', s),
+        lambda s: re.sub(r'}\s*\[', '},[', s),
+        
+        # Fix trailing commas
+        lambda s: re.sub(r',\s*}', '}', s),
+        lambda s: re.sub(r',\s*]', ']', s),
+        
+        # Fix missing quotes around keys
+        lambda s: re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', s),
+        
+        # Fix unescaped quotes
+        lambda s: s.replace('\\"', '"').replace('"', '\\"'),
+        lambda s: re.sub(r'\\*"', '"', s),
+        
+        # Fix incomplete objects/arrays
+        lambda s: s + '}' if s.count('{') > s.count('}') else s,
+        lambda s: s + ']' if s.count('[') > s.count(']') else s,
+    ]
+    
+    for repair in repairs:
+        try:
+            repaired = repair(json_str)
+            return json.loads(repaired)
+        except:
+            continue
+    
+    # If all repairs fail, try to extract a minimal valid structure
+    try:
+        # Look for any valid ingredient-like patterns
+        ingredient_pattern = r'"name"\s*:\s*"([^"]*)".*?"halal_status"\s*:\s*"([^"]*)".*?"reason"\s*:\s*"([^"]*)"'
+        ingredients = []
+        
+        for match in re.finditer(ingredient_pattern, json_str, re.DOTALL):
+            name, status, reason = match.groups()
+            ingredients.append({
+                "name": name,
+                "original_text": name,
+                "halal_status": status if status in ['halal', 'haram', 'syubhah'] else 'syubhah',
+                "reason": reason
+            })
+        
+        # Extract overall status and confidence if possible
+        overall_status = 'syubhah'
+        confidence = 30
+        concerns = 'JSON parsing issues encountered'
+        
+        status_match = re.search(r'"overall_halal_status"\s*:\s*"([^"]*)"', json_str)
+        if status_match:
+            status = status_match.group(1)
+            if status in ['halal', 'haram', 'syubhah']:
+                overall_status = status
+        
+        conf_match = re.search(r'"overall_halal_confidence"\s*:\s*(\d+)', json_str)
+        if conf_match:
+            confidence = int(conf_match.group(1))
+        
+        concern_match = re.search(r'"main_concerns"\s*:\s*"([^"]*)"', json_str)
+        if concern_match:
+            concerns = concern_match.group(1)
+        
+        return {
+            "ingredients": ingredients if ingredients else [{
+                "name": "Parsing incomplete",
+                "original_text": "JSON structure damaged",
+                "halal_status": "syubhah", 
+                "reason": "Could not parse AI response properly"
+            }],
+            "overall_halal_status": overall_status,
+            "overall_halal_confidence": confidence,
+            "main_concerns": concerns
+        }
+        
+    except Exception:
+        return None
+
 def parse_halal_response(response_text):
-    """Parse and validate the halal analysis response with improved error handling"""
+    """Parse and validate the halal analysis response with advanced error handling"""
     
     if not response_text or not response_text.strip():
         return create_default_response("Empty AI response")
@@ -203,50 +291,43 @@ def parse_halal_response(response_text):
         if len(response_text) < 20:
             return create_default_response("Response too short")
         
-        # Try to clean up the response first
+        # Clean up the response
         json_str = response_text
         
-        # Remove common non-JSON prefixes/suffixes
-        if json_str.startswith("```json"):
-            json_str = json_str[7:]
-        if json_str.startswith("```"):
-            json_str = json_str[3:]
-        if json_str.endswith("```"):
-            json_str = json_str[:-3]
+        # Remove markdown code blocks
+        if "```json" in json_str:
+            start = json_str.find("```json") + 7
+            end = json_str.find("```", start)
+            json_str = json_str[start:end] if end != -1 else json_str[start:]
+        elif "```" in json_str:
+            start = json_str.find("```") + 3
+            end = json_str.find("```", start)
+            json_str = json_str[start:end] if end != -1 else json_str[start:]
         
-        # Remove any text before the first {
-        if "{" in json_str:
+        # Remove any text before first { and after last }
+        if "{" in json_str and "}" in json_str:
             start_idx = json_str.find("{")
-            json_str = json_str[start_idx:]
-        else:
-            return create_default_response("No JSON found in response")
-        
-        # Remove any text after the last }
-        if "}" in json_str:
             end_idx = json_str.rfind("}") + 1
-            json_str = json_str[:end_idx]
+            json_str = json_str[start_idx:end_idx]
+        else:
+            return create_default_response("No valid JSON structure found")
         
-        # Fix common JSON issues
-        json_str = json_str.replace("'", '"')  # Single quotes to double quotes
+        # Basic cleanup
+        json_str = json_str.replace("'", '"')
         json_str = json_str.replace('True', 'true').replace('False', 'false').replace('None', 'null')
         
-        # Remove trailing commas
-        import re
-        json_str = re.sub(r',\s*}', '}', json_str)
-        json_str = re.sub(r',\s*]', ']', json_str)
+        # Attempt to repair and parse JSON
+        data = repair_json(json_str)
         
-        # Try to parse JSON
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            # If parsing fails, try to create a minimal valid response
-            return create_default_response(f"JSON parsing error: {str(e)[:50]}")
+        if data is None:
+            return create_default_response("JSON repair failed - structure too damaged")
         
-        # Validate and fix the parsed data
+        # Validate and return
         return validate_halal_data(data)
         
     except Exception as e:
-        return create_default_response(f"Parsing exception: {str(e)[:50]}")
+        return create_default_response(f"Parsing exception: {str(e)[:100]}")
+
 
 def create_minimal_analysis_from_text(extracted_text):
     """Create a basic analysis when AI parsing completely fails"""
@@ -662,7 +743,7 @@ def get_jakim_guidance(english_name, original_text, status):
 
 def main():
     st.set_page_config(
-        page_title="Halal Checker",
+        page_title="JAKIM Halal Checker",
         page_icon="🥘",
         layout="wide",
         initial_sidebar_state="auto"
@@ -701,7 +782,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # Header
-    st.title("🥘 Halal Checker")
+    st.title("🥘 JAKIM Halal Checker")
     st.markdown("**Quick halal verification using Malaysia's JAKIM standards**")
     
     # Current standards information
