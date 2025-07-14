@@ -191,7 +191,7 @@ Apply JAKIM standards strictly - be conservative in assessment. When unsure abou
         return None
 
 def parse_halal_response(response_text):
-    """Parse and validate the halal analysis response"""
+    """Parse and validate the halal analysis response with improved error handling"""
     
     if not response_text or not response_text.strip():
         return create_default_response("Empty AI response")
@@ -199,49 +199,116 @@ def parse_halal_response(response_text):
     try:
         response_text = response_text.strip()
         
-        # Extract JSON
+        # Check if response is too short
+        if len(response_text) < 20:
+            return create_default_response("Response too short")
+        
+        # Try to clean up the response first
         json_str = response_text
-        if "```json" in response_text:
-            json_start = response_text.find("```json") + 7
-            json_end = response_text.find("```", json_start)
-            if json_end != -1:
-                json_str = response_text[json_start:json_end].strip()
-            else:
-                json_str = response_text[json_start:].strip()
         
-        # Find JSON boundaries
+        # Remove common non-JSON prefixes/suffixes
+        if json_str.startswith("```json"):
+            json_str = json_str[7:]
+        if json_str.startswith("```"):
+            json_str = json_str[3:]
+        if json_str.endswith("```"):
+            json_str = json_str[:-3]
+        
+        # Remove any text before the first {
         if "{" in json_str:
-            json_start = json_str.find("{")
-            brace_count = 0
-            json_end = len(json_str)
-            
-            for i in range(json_start, len(json_str)):
-                if json_str[i] == "{":
-                    brace_count += 1
-                elif json_str[i] == "}":
-                    brace_count -= 1
-                    if brace_count == 0:
-                        json_end = i + 1
-                        break
-            
-            json_str = json_str[json_start:json_end]
+            start_idx = json_str.find("{")
+            json_str = json_str[start_idx:]
         else:
-            return create_default_response("No JSON found")
+            return create_default_response("No JSON found in response")
         
-        # Common JSON fixes
-        json_str = json_str.replace("'", '"')
+        # Remove any text after the last }
+        if "}" in json_str:
+            end_idx = json_str.rfind("}") + 1
+            json_str = json_str[:end_idx]
+        
+        # Fix common JSON issues
+        json_str = json_str.replace("'", '"')  # Single quotes to double quotes
         json_str = json_str.replace('True', 'true').replace('False', 'false').replace('None', 'null')
         
-        # Parse JSON
+        # Remove trailing commas
+        import re
+        json_str = re.sub(r',\s*}', '}', json_str)
+        json_str = re.sub(r',\s*]', ']', json_str)
+        
+        # Try to parse JSON
         try:
             data = json.loads(json_str)
-        except json.JSONDecodeError:
-            return create_default_response("JSON parsing failed")
+        except json.JSONDecodeError as e:
+            # If parsing fails, try to create a minimal valid response
+            return create_default_response(f"JSON parsing error: {str(e)[:50]}")
         
+        # Validate and fix the parsed data
         return validate_halal_data(data)
         
-    except Exception:
-        return create_default_response("Parsing error")
+    except Exception as e:
+        return create_default_response(f"Parsing exception: {str(e)[:50]}")
+
+def create_minimal_analysis_from_text(extracted_text):
+    """Create a basic analysis when AI parsing completely fails"""
+    
+    # Simple keyword-based analysis as absolute fallback
+    text_lower = extracted_text.lower()
+    
+    # Check for obvious haram ingredients
+    haram_keywords = ['pork', 'bacon', 'ham', 'wine', 'alcohol', 'gelatin', 'lard']
+    syubhah_keywords = ['emulsifier', 'lecithin', 'mono', 'diglyceride', 'enzyme', 'glycerol']
+    
+    found_haram = [kw for kw in haram_keywords if kw in text_lower]
+    found_syubhah = [kw for kw in syubhah_keywords if kw in text_lower]
+    
+    ingredients = []
+    
+    # Add found problematic ingredients
+    for ingredient in found_haram:
+        ingredients.append({
+            "name": ingredient.title(),
+            "original_text": f"Found in text: {ingredient}",
+            "halal_status": "haram", 
+            "reason": f"Contains prohibited ingredient: {ingredient}"
+        })
+    
+    for ingredient in found_syubhah:
+        ingredients.append({
+            "name": ingredient.title(),
+            "original_text": f"Found in text: {ingredient}",
+            "halal_status": "syubhah",
+            "reason": f"Questionable ingredient requiring verification: {ingredient}"
+        })
+    
+    # If no specific ingredients found, create generic response
+    if not ingredients:
+        ingredients = [{
+            "name": "Could not parse ingredients",
+            "original_text": "Text analysis incomplete",
+            "halal_status": "syubhah",
+            "reason": "Unable to properly analyze ingredients. Manual review recommended."
+        }]
+    
+    # Determine overall status
+    if found_haram:
+        overall_status = "haram"
+        confidence = 70
+        concerns = f"Contains prohibited ingredients: {', '.join(found_haram)}"
+    elif found_syubhah:
+        overall_status = "syubhah"
+        confidence = 50
+        concerns = f"Contains questionable ingredients: {', '.join(found_syubhah)}"
+    else:
+        overall_status = "syubhah"
+        confidence = 30
+        concerns = "Could not properly analyze ingredients from the image text"
+    
+    return {
+        "ingredients": ingredients,
+        "overall_halal_status": overall_status,
+        "overall_halal_confidence": confidence,
+        "main_concerns": concerns
+    }
 
 def create_default_response(reason):
     """Create a default response when parsing fails"""
@@ -332,7 +399,7 @@ def hybrid_analysis(client, uploaded_file):
     if not extracted_text or len(extracted_text.strip()) < 10:
         return None
     
-    # Analyze halal status
+    # Try primary analysis first
     analysis_response = analyze_halal_status(client, extracted_text)
     
     if analysis_response:
@@ -340,7 +407,65 @@ def hybrid_analysis(client, uploaded_file):
         if response_clean and response_clean.startswith('{') and len(response_clean) > 30:
             return analysis_response
     
+    # Fallback: Try simplified analysis with different approach
+    fallback_response = analyze_halal_status_fallback(client, extracted_text)
+    
+    if fallback_response:
+        response_clean = fallback_response.strip()
+        if response_clean and response_clean.startswith('{') and len(response_clean) > 30:
+            return fallback_response
+    
     return None
+
+def analyze_halal_status_fallback(client, extracted_text):
+    """Fallback analysis with simpler prompt structure"""
+    
+    simple_prompt = f"""Analyze this food ingredient text for halal compliance according to JAKIM Malaysia standards.
+
+Text: {extracted_text}
+
+Respond with this exact JSON format only:
+{{
+  "ingredients": [
+    {{
+      "name": "ingredient name in English",
+      "original_text": "original text from package", 
+      "halal_status": "halal",
+      "reason": "explanation"
+    }}
+  ],
+  "overall_halal_status": "halal",
+  "overall_halal_confidence": 85,
+  "main_concerns": "summary of concerns"
+}}
+
+Rules:
+- halal_status must be: "halal", "haram", or "syubhah"
+- Mark as "haram": pork, alcohol, non-halal animal products
+- Mark as "syubhah": unclear sources, questionable E-numbers
+- Confidence: 0-100 integer
+- NO text before or after JSON"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Use more reliable model for fallback
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a halal analyst. Respond only with valid JSON following the exact format specified."
+                },
+                {
+                    "role": "user", 
+                    "content": simple_prompt
+                }
+            ],
+            max_tokens=800,
+            temperature=0.0
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"Fallback analysis failed: {e}")
+        return None
 
 def display_halal_results(analysis):
     """Display streamlined halal status results with focus on problematic ingredients"""
@@ -655,6 +780,28 @@ def main():
                     
                     if not response:
                         st.error("❌ Analysis failed. Please try with a clearer image of the ingredients list.")
+                        
+                        # Try emergency fallback analysis
+                        with st.spinner("🔄 Trying alternative analysis method..."):
+                            # Get the extracted text again for emergency analysis
+                            extracted_text = extract_text_with_gpt4o_mini(client, uploaded_file)
+                            if extracted_text and len(extracted_text.strip()) > 10:
+                                emergency_analysis = create_minimal_analysis_from_text(extracted_text)
+                                st.warning("⚠️ Using simplified analysis method")
+                                st.header("📊 Halal Status Results (Simplified)")
+                                display_halal_results(emergency_analysis)
+                                
+                                # Show what text was detected
+                                with st.expander("📝 Detected Text from Image"):
+                                    st.text(extracted_text)
+                            else:
+                                st.error("❌ Could not extract readable text from the image. Please ensure:")
+                                st.markdown("""
+                                - The ingredients list is clearly visible
+                                - Good lighting without glare
+                                - Text is in focus and readable
+                                - Image is not blurry or too small
+                                """)
                         return
                     
                     # Parse and display results
